@@ -22,7 +22,8 @@ except AttributeError:
 
 # --- 이 아래부터 나머지 패키지들을 임포트합니다 ---
 import yfinance as yf
-from ddgs import DDGS
+#from ddgs import DDGS
+from duckduckgo_search import DDGS
 from langchain_core.tools import tool
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.messages import HumanMessage, SystemMessage
