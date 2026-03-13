@@ -5,7 +5,6 @@ import streamlit as st
 
 # ==========================================
 # 🚨 0. 파이썬 전역 인코딩 강제 덮어쓰기 (Monkey Patch)
-# 이 부분이 LangChain 내부의 인코딩 에러를 원천 차단합니다.
 # ==========================================
 def getpreferredencoding(do_setlocale=True):
     return "utf-8"
@@ -22,7 +21,6 @@ except AttributeError:
 
 # --- 이 아래부터 나머지 패키지들을 임포트합니다 ---
 import yfinance as yf
-#from ddgs import DDGS
 from duckduckgo_search import DDGS
 from langchain_core.tools import tool
 from langchain_google_genai import ChatGoogleGenerativeAI
@@ -34,13 +32,11 @@ from langgraph.prebuilt import create_react_agent
 # ==========================================
 st.set_page_config(page_title="Sean's 주식 애널리스트", page_icon="📈", layout="centered")
 
-# 수정된 부분: secrets.toml에서 API 키를 읽어와 환경 변수에 설정합니다.
-# 이렇게 설정하면 LangChain의 ChatGoogleGenerativeAI가 자동으로 이 환경 변수를 인식합니다.
 if "GEMINI_API_KEY" in st.secrets:
     os.environ["GOOGLE_API_KEY"] = st.secrets["GEMINI_API_KEY"]
 else:
     st.error("API 키를 찾을 수 없습니다. secrets.toml 파일이나 Streamlit Cloud의 Secrets 설정을 확인해 주세요.")
-    st.stop() # 키가 없으면 실행 중지
+    st.stop()
 
 # ==========================================
 # 🛠️ 2. 도구(Tools) 정의
@@ -87,7 +83,6 @@ def search_news(query: str) -> str:
         
         news_text = "[최신 뉴스 검색 결과]\n"
         for i, res in enumerate(results):
-            # 딕셔너리 구조 변경에 대비해 .get() 사용
             title = res.get('title', '제목 없음')
             body = res.get('body', '내용 없음')
             news_text += f"{i+1}. 제목: {title}\n   내용 요약: {body}\n"
@@ -101,10 +96,8 @@ def search_news(query: str) -> str:
 # ==========================================
 @st.cache_resource
 def load_agent():
-    # 최신 모델 권장: gemini-2.5-flash 또는 gemini-2.5-pro
     llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0)
     tools = [get_stock_price, search_news]
-    # LangGraph를 사용하여 에이전트 생성
     return create_react_agent(llm, tools)
 
 agent = load_agent()
@@ -123,11 +116,9 @@ system_prompt = (
 st.title("📈 Sean's AI 주식 애널리스트")
 st.markdown("관심 있는 주식 종목을 입력하면, AI가 실시간 가격과 뉴스를 분석해 리포트를 작성합니다.")
 
-# 대화 기록 저장
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
-# 이전 대화 내용 출력
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
@@ -137,16 +128,14 @@ for msg in st.session_state.messages:
 # ==========================================
 if user_input := st.chat_input("종목을 입력하세요 (예: 테슬라 주가 어때?, 카카오 035720.KS 분석해 줘)"):
     
-    # 사용자 입력 출력 및 저장
     with st.chat_message("user"):
         st.markdown(user_input)
     st.session_state.messages.append({"role": "user", "content": user_input})
     
-    # AI 응답 처리
     with st.chat_message("assistant"):
-        with st.spinner("AI가 주가 차트와 최신 뉴스를 융합하여 분석 중입니다..."):
+        # 💡 변경된 부분: 진행 상황을 UI로 보여주는 st.status 사용
+        with st.status("🤖 AI가 데이터를 수집하고 분석하는 중입니다...", expanded=True) as status:
             
-            # 매 요청마다 시스템 프롬프트를 주입하여 역할 고정
             inputs = {
                 "messages": [
                     SystemMessage(content=system_prompt),
@@ -155,11 +144,34 @@ if user_input := st.chat_input("종목을 입력하세요 (예: 테슬라 주가
             }
             
             try:
-                # 에이전트 실행
-                response = agent.invoke(inputs)
-                final_content = response["messages"][-1].content
+                final_content = ""
+                # 💡 변경된 부분: agent.invoke 대신 agent.stream을 사용하여 실시간 로그 출력
+                for chunk in agent.stream(inputs):
+                    # 1. AI가 도구를 호출하려고 할 때
+                    if "agent" in chunk:
+                        messages = chunk["agent"]["messages"]
+                        for msg in messages:
+                            if hasattr(msg, "tool_calls") and msg.tool_calls:
+                                for tool_call in msg.tool_calls:
+                                    st.write(f"🛠️ **도구 실행:** `{tool_call['name']}` (검색어: `{tool_call['args']}`)")
+                            
+                            # 최종 응답일 경우 저장
+                            if not msg.tool_calls and msg.content:
+                                final_content = msg.content
+                                
+                    # 2. 도구가 데이터를 성공적으로 가져왔을 때
+                    elif "tools" in chunk:
+                        messages = chunk["tools"]["messages"]
+                        for msg in messages:
+                            st.write(f"✅ **데이터 수집 완료:** `{msg.name}`")
+                            # 너무 길면 화면이 복잡해지므로 expander(접기/펴기)로 감싸서 보여줌
+                            with st.expander(f"🔍 {msg.name} 수집 데이터 확인"):
+                                st.text(msg.content)
                 
-                # 결과 텍스트 추출 (LangGraph 응답 구조 처리)
+                # 분석이 끝나면 status 창을 닫고 완료 메시지로 변경
+                status.update(label="분석 완료!", state="complete", expanded=False)
+                
+                # 최종 리포트 출력 및 저장
                 report_text = ""
                 if isinstance(final_content, list):
                     for block in final_content:
@@ -170,11 +182,11 @@ if user_input := st.chat_input("종목을 입력하세요 (예: 테슬라 주가
                 else:
                     report_text = final_content
                 
-                # 화면에 리포트 출력 및 저장
                 st.markdown(report_text)
                 st.session_state.messages.append({"role": "assistant", "content": report_text})
                 
             except Exception as e:
+                status.update(label="오류 발생", state="error", expanded=True)
                 error_msg = f"❌ 분석 중 오류가 발생했습니다: {e}"
                 st.error(error_msg)
                 st.session_state.messages.append({"role": "assistant", "content": error_msg})
